@@ -42,7 +42,7 @@ uint32_t    rov_createMesh(const float *pos, const float *normals, const float *
 // ----------------------------------------------------------- [ Renderpass ] --
 
 
-void        rov_startRenderPass(const float view[16], const float proj[16], uint32_t clear_flags);
+void        rov_startRenderPass(const float view[16], const float proj[16], const uint32_t viewport[4], uint32_t clear_flags);
 
 
 // ----------------------------------------------------- [ General Settings ] --
@@ -77,6 +77,7 @@ void        rov_submitMeshTransform(const float world[16]);
 #include <vector>
 #include <string>
 #include <stdio.h>
+#include <utilities/utilities.hpp>
 
 
 namespace
@@ -125,6 +126,8 @@ namespace
     rovMat4 view;
     rovMat4 proj;
     
+    uint32_t viewport[4];
+    
     uint32_t clear_flags;
     
     std::vector<rovMaterial> materials;
@@ -170,12 +173,14 @@ namespace
 
 
 void
-rov_startRenderPass(const float view[16], const float proj[16], uint32_t clear_flags)
+rov_startRenderPass(const float view[16], const float proj[16], const uint32_t viewport[4], uint32_t clear_flags)
 {
   rov_render_passes.emplace_back();
   
   memcpy(rov_render_passes.back().view.data, view, sizeof(float) * 16);
   memcpy(rov_render_passes.back().proj.data, proj, sizeof(float) * 16);
+  
+  memcpy(rov_render_passes.back().viewport, viewport, sizeof(rovRenderPass::viewport));
   
   rov_render_passes.back().clear_flags = clear_flags;
   
@@ -233,8 +238,43 @@ rov_submitMeshTransform(const float world[16])
   dc.mesh = curr_rov_mesh;
   memcpy(dc.world.data, world, sizeof(float) * 16);
   
-  rov_render_passes.back().materials.back().draw_calls += 1;
-  rov_render_passes.back().draw_calls.emplace_back(dc);
+  size_t draw_calls = 0;
+  
+  rovMaterial new_mat{};
+  new_mat.draw_calls = 1;
+  new_mat.material = rov_curr_material();
+
+  
+  for(auto it = std::begin(rov_render_passes.back().materials); it != std::end(rov_render_passes.back().materials); ++it)
+  {
+    // Found a same material
+    if(it->material == new_mat.material)
+    {
+      it->draw_calls += 1;
+      rov_render_passes.back().draw_calls.insert(std::begin(rov_render_passes.back().draw_calls) + draw_calls, dc);
+      break;
+    }
+  
+    // Found insert point.
+    if(it->material > new_mat.material)
+    {
+      rov_render_passes.back().materials.insert(it, new_mat);
+      rov_render_passes.back().draw_calls.insert(std::begin(rov_render_passes.back().draw_calls) + draw_calls, dc);
+      break;;
+    }
+    
+    draw_calls += it->draw_calls;
+  }
+  
+  // Insert into the end if we must
+  if(rov_render_passes.back().draw_calls.size() == draw_calls)
+  {
+    rov_render_passes.back().materials.emplace_back(new_mat);
+    rov_render_passes.back().draw_calls.emplace_back(dc);
+  }
+  
+//  rov_render_passes.back().materials.back().draw_calls += 1;
+//  rov_render_passes.back().draw_calls.emplace_back(dc);
 }
 
 
@@ -324,6 +364,9 @@ namespace
     GLint vs_in_uv;
     
     GLint uni_wvp;
+    GLint uni_world;
+    GLint uni_eye;
+    GLint uni_color;
   };
   
   rov_gl_shader rov_mesh_shaders[3]; // Fullbright / Lit / DirLight
@@ -431,7 +474,10 @@ namespace
     out->vs_in_norm = glGetAttribLocation(prog, "vs_in_normal");
     out->vs_in_uv   = glGetAttribLocation(prog, "vs_in_texture_coords");
     
-    out->uni_wvp = glGetUniformLocation(prog, "uni_wvp");
+    out->uni_wvp   = glGetUniformLocation(prog, "uni_wvp");
+    out->uni_world = glGetUniformLocation(prog, "uni_world");
+    out->uni_eye   = glGetUniformLocation(prog, "uni_eye");
+    out->uni_color = glGetUniformLocation(prog, "uni_color");
     
     out->program = prog;
 
@@ -561,16 +607,19 @@ rov_initialize()
       in vec2 vs_in_texture_coords;
     
       uniform mat4 uni_wvp;
+      uniform mat4 uni_world;
     
       out vec2 ps_in_texture_coords;
-      out vec3 ps_in_color;
+      out vec3 ps_in_normal;
+      out vec3 ps_in_fragpos;
     
       void
       main()
       {
         gl_Position = uni_wvp * vec4(vs_in_position, 1.0);
         ps_in_texture_coords = vs_in_texture_coords;
-        ps_in_color = vs_in_normal;
+        ps_in_normal = normalize(mat3(transpose(inverse(uni_world))) * vs_in_normal);
+        ps_in_fragpos = vec3(uni_world * vec4(vs_in_position, 1.0));
       }
     )GLSL";
     
@@ -579,10 +628,11 @@ rov_initialize()
       #version 330 core
     
       in vec2 ps_in_texture_coords;
-      in vec3 ps_in_color;
+      in vec3 ps_in_normal;
+      in vec3 ps_in_fragpos;
     
       uniform sampler2D uni_texture_0;
-    
+      uniform vec3 uni_eye;
       uniform vec4 uni_color;
     
       out vec4 ps_out_final_color;
@@ -590,7 +640,29 @@ rov_initialize()
       void
       main()
       {
-        ps_out_final_color = vec4(0,0,1,1);
+        // set the specular term to black
+        vec4 spec = vec4(0.0);
+        vec3 view_dir = normalize(uni_eye - ps_in_fragpos);
+        vec3 l_dir = normalize(vec3(-0.35,-1.0,1.25));
+//        vec4 diffuse = texture(uni_map_01, texture_coord);
+        vec4 diffuse = vec4(uni_color);//
+        vec4 ambient = vec4(0.1, 0.1, 0.1, 1);
+        vec4 specular = vec4(0.1, 0.1, 0.1, 1);
+        float shininess = 32;
+        // normalize both input vectors
+        vec3 n = normalize(ps_in_normal);
+        vec3 e = normalize(view_dir);
+        float intensity = max(dot(n,l_dir), 0.0);
+        // if the vertex is lit compute the specular color
+        if (intensity > 0.0)
+        {
+            // compute the half vector
+            vec3 h = normalize(l_dir + e);
+            // compute the specular term into spec
+            float intSpec = max(dot(h,n), 0.0);
+            spec = specular * pow(intSpec,shininess);
+        }
+        ps_out_final_color = max(intensity *  diffuse + spec, ambient);
       }
     )GLSL";
     
@@ -616,14 +688,14 @@ rov_execute()
   */
   for(auto &rp : rov_render_passes)
   {
-    GLbitfield clear_flags = 0;
-    if(rp.clear_flags & rovClearFlag_Color) { clear_flags |= GL_COLOR_BUFFER_BIT; }
-    if(rp.clear_flags & rovClearFlag_Depth) { clear_flags |= GL_DEPTH_BUFFER_BIT; }
-  
+    GLbitfield cl_flags = 0;
+    if(rp.clear_flags & rovClearFlag_Color) { cl_flags |= GL_COLOR_BUFFER_BIT; }
+    if(rp.clear_flags & rovClearFlag_Depth) { cl_flags |= GL_DEPTH_BUFFER_BIT; }
+    
     glClearColor(1, 1, 0, 1);
-    glClear(clear_flags);
+    glClear(cl_flags);
     glEnable(GL_DEPTH_TEST);
-    glViewport(0, 0, 1280, 720);
+    glViewport(rp.viewport[0], rp.viewport[1], rp.viewport[2], rp.viewport[3]);
     
     const math::mat4 proj = math::mat4_init_with_array(rp.proj.data);
     const math::mat4 view = math::mat4_init_with_array(rp.view.data);
@@ -631,10 +703,20 @@ rov_execute()
     /*
       For each material in the pass.
     */
+    size_t dc_index = 0;
+    
     for(auto &mat : rp.materials)
     {
       // Pull Material Info Out
-//      const uint32_t color   = lib::bits::upper32(mat.material);
+      const uint32_t color   = lib::bits::upper32(mat.material);
+      
+      const float colorf[4] {
+        math::to_float(lib::bits::first8(color)) / 255.f,
+        math::to_float(lib::bits::second8(color)) / 255.f,
+        math::to_float(lib::bits::third8(color)) / 255.f,
+        math::to_float(lib::bits::forth8(color)) / 255.f,
+      };
+      
       const uint32_t details = lib::bits::lower32(mat.material);
       
       const uint8_t shader = lib::bits::first8(details);
@@ -642,32 +724,9 @@ rov_execute()
 //      const uint8_t texture_02 = lib::bits::third8(details);
 //      const uint8_t texture_03 = lib::bits::forth8(details);
       
-      size_t dc_index = 0;
+      
       glUseProgram(rov_mesh_shaders[shader].program);
-      
-      size_t pointer = 0;
-      
-      if(rov_mesh_shaders[shader].vs_in_pos >= 0)
-      {
-        glEnableVertexAttribArray(rov_mesh_shaders[shader].vs_in_pos);
-        glVertexAttribPointer(rov_mesh_shaders[shader].vs_in_pos, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)pointer);
-      }
-      
-      pointer += (sizeof(float) * 3);
-      
-      if(rov_mesh_shaders[shader].vs_in_norm >= 0)
-      {
-        glEnableVertexAttribArray(rov_mesh_shaders[shader].vs_in_norm);
-        glVertexAttribPointer(rov_mesh_shaders[shader].vs_in_norm, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)pointer);
-      }
-      
-      pointer += (sizeof(float) * 3);
-      
-      if(rov_mesh_shaders[shader].vs_in_uv)
-      {
-        glEnableVertexAttribArray(rov_mesh_shaders[shader].vs_in_uv);
-        glVertexAttribPointer(rov_mesh_shaders[shader].vs_in_uv, 2, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)pointer);
-      }
+  
       /*
         For each draw call in the material.
       */
@@ -675,13 +734,67 @@ rov_execute()
       {
         auto &dc = rp.draw_calls[dc_index++];
       
-        auto vbo = rov_meshes[shader].gl_id;
+        auto vbo = rov_meshes[0].gl_id;
         glBindBuffer(GL_ARRAY_BUFFER, vbo);
+        
+        // Vertex
+        {
+          size_t pointer = 0;
+      
+          if(rov_mesh_shaders[shader].vs_in_pos >= 0)
+          {
+            glEnableVertexAttribArray(rov_mesh_shaders[shader].vs_in_pos);
+            glVertexAttribPointer(
+              rov_mesh_shaders[shader].vs_in_pos,
+              3,
+              GL_FLOAT,
+              GL_FALSE,
+              8 * sizeof(float),
+              (void*)pointer
+            );
+          }
+          
+          pointer += (sizeof(float) * 3);
+          
+          if(rov_mesh_shaders[shader].vs_in_norm >= 0)
+          {
+            glEnableVertexAttribArray(rov_mesh_shaders[shader].vs_in_norm);
+            glVertexAttribPointer(
+              rov_mesh_shaders[shader].vs_in_norm,
+              3,
+              GL_FLOAT,
+              GL_FALSE,
+              8 * sizeof(float),
+              (void*)pointer
+            );
+          }
+          
+          pointer += (sizeof(float) * 3);
+          
+          if(rov_mesh_shaders[shader].vs_in_uv)
+          {
+            glEnableVertexAttribArray(rov_mesh_shaders[shader].vs_in_uv);
+            glVertexAttribPointer(
+              rov_mesh_shaders[shader].vs_in_uv,
+              2,
+              GL_FLOAT,
+              GL_FALSE,
+              8 * sizeof(float),
+              (void*)pointer
+            );
+          }
+        }
         
         const math::mat4 world   = math::mat4_init_with_array(dc.world.data);
         const math::mat4 wvp_mat = math::mat4_multiply(world, view, proj);
+        
+        const math::vec4 pos = math::mat4_multiply(math::vec4_init(0,0,0,1), view);
 
         glUniformMatrix4fv(rov_mesh_shaders[shader].uni_wvp, 1, GL_FALSE, math::mat4_get_data(wvp_mat));
+        glUniformMatrix4fv(rov_mesh_shaders[shader].uni_world, 1, GL_FALSE, math::mat4_get_data(world));
+        glUniform3fv(rov_mesh_shaders[shader].uni_eye, 1, pos.data);
+        glUniform4fv(rov_mesh_shaders[shader].uni_color, 1, colorf);
+       
         glDrawArrays(GL_TRIANGLES, 0, 36);
       }
     }
