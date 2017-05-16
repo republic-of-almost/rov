@@ -99,7 +99,7 @@ namespace
 
   float       curr_rov_clear_color[4]{0, 0, 0, 1};
   uint8_t     curr_rov_textures[rov_max_textures]{0};
-  uint32_t    curr_rov_mesh = 0;
+  uint32_t    curr_rov_mesh = curr_rov_mesh;
   uint8_t     curr_rov_mesh_shader = rovShader_Fullbright;
 }
 
@@ -540,7 +540,7 @@ rov_initialize()
       void
       main()
       {
-        ps_out_final_color = vec4(1,0,1,1);
+        ps_out_final_color = uni_color;
       }
     )GLSL";
     
@@ -734,7 +734,7 @@ rov_execute()
       {
         auto &dc = rp.draw_calls[dc_index++];
       
-        auto vbo = rov_meshes[0].gl_id;
+        auto vbo = rov_meshes[dc.mesh].gl_id;
         glBindBuffer(GL_ARRAY_BUFFER, vbo);
         
         // Vertex
