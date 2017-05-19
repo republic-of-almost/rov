@@ -291,6 +291,13 @@ rov_submitMeshTransform(const float world[16])
 #define ROV_IMPL_INCLUDED
 
 
+namespace {
+
+  GLuint vao;
+
+}
+
+
 // ------------------------------------------------------------ [ Resources ] --
 
 
@@ -305,6 +312,7 @@ namespace
   struct rov_gl_mesh
   {
     GLuint gl_id;
+    size_t vertex_stride;
     size_t vertex_count;
   };
   
@@ -317,6 +325,8 @@ namespace
 uint32_t
 rov_createMesh(const float *positions, const float *normals, const float *tex_coords, size_t count)
 {
+  glBindVertexArray(vao);
+
   constexpr size_t stride = 3 + 3 + 2;
 
   std::vector<GLfloat> vertices;
@@ -343,8 +353,10 @@ rov_createMesh(const float *positions, const float *normals, const float *tex_co
   glBindBuffer(GL_ARRAY_BUFFER, vbo);
   glBufferData(GL_ARRAY_BUFFER, sizeof(GLfloat) * vertices.size(), vertices.data(), GL_STATIC_DRAW);
   
-  const rov_gl_mesh rov_mesh{vbo, count};
+  const rov_gl_mesh rov_mesh{vbo, 8, count};
   rov_meshes.emplace_back(rov_mesh);
+  
+  glBindVertexArray(0);
   
   return (uint32_t)rov_meshes.size();
 }
@@ -483,13 +495,6 @@ namespace
 
     glBindVertexArray(0);
   }
-}
-
-
-namespace {
-
-  GLuint vao;
-
 }
 
 
@@ -643,7 +648,7 @@ rov_initialize()
         // set the specular term to black
         vec4 spec = vec4(0.0);
         vec3 view_dir = normalize(uni_eye - ps_in_fragpos);
-        vec3 l_dir = normalize(vec3(-0.35,-1.0,1.25));
+        vec3 l_dir = normalize(vec3(-0.35,1.0,-1.25));
 //        vec4 diffuse = texture(uni_map_01, texture_coord);
         vec4 diffuse = vec4(uni_color);//
         vec4 ambient = vec4(0.1, 0.1, 0.1, 1);
@@ -682,7 +687,14 @@ void
 rov_execute()
 {
   glBindVertexArray(vao);
-
+  
+  glUseProgram(0);
+  glDisable(GL_BLEND);
+//  glDisable(GL_CULL_FACE);
+  glEnable(GL_CULL_FACE);
+  glCullFace(GL_BACK);
+  glEnable(GL_DEPTH_TEST);
+  
   /*
     For each renderpass.
   */
@@ -734,8 +746,9 @@ rov_execute()
       {
         auto &dc = rp.draw_calls[dc_index++];
       
-        auto vbo = rov_meshes[dc.mesh].gl_id;
-        glBindBuffer(GL_ARRAY_BUFFER, vbo);
+        const rov_gl_mesh vbo = rov_meshes[dc.mesh];
+        glBindBuffer(GL_ARRAY_BUFFER, vbo.gl_id);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
         
         // Vertex
         {
@@ -787,18 +800,21 @@ rov_execute()
         
         const math::mat4 world   = math::mat4_init_with_array(dc.world.data);
         const math::mat4 wvp_mat = math::mat4_multiply(world, view, proj);
-        
-        const math::vec4 pos = math::mat4_multiply(math::vec4_init(0,0,0,1), view);
+        const math::vec4 pos     = math::mat4_multiply(math::vec4_init(0,0,0,1), view);
 
         glUniformMatrix4fv(rov_mesh_shaders[shader].uni_wvp, 1, GL_FALSE, math::mat4_get_data(wvp_mat));
         glUniformMatrix4fv(rov_mesh_shaders[shader].uni_world, 1, GL_FALSE, math::mat4_get_data(world));
         glUniform3fv(rov_mesh_shaders[shader].uni_eye, 1, pos.data);
         glUniform4fv(rov_mesh_shaders[shader].uni_color, 1, colorf);
        
-        glDrawArrays(GL_TRIANGLES, 0, 36);
+        glDrawArrays(GL_TRIANGLES, 0, vbo.vertex_count);
       }
     }
   }
+  
+//  glBindBuffer(GL_ARRAY_BUFFER, 0);
+//  glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+
   
   glBindVertexArray(0);
   
