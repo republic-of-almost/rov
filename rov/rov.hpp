@@ -55,6 +55,12 @@ void        rov_setMesh(uint32_t mesh_id);
 void        rov_setShader(uint32_t shader_id);
 
 
+// ---------------------------------------------------- [ Dbg Line Renderer ] --
+
+
+void        rov_submitLine(const float start[3], const float end[3]);
+
+
 // -------------------------------------------------------- [ Mesh Renderer ] --
 
 
@@ -85,6 +91,11 @@ namespace
   struct rovMat4
   {
     float data[16];
+  };
+  
+  struct rovVec3
+  {
+    float data[3];
   };
   
   struct Camera
@@ -120,6 +131,13 @@ namespace
     uint32_t mesh;
     rovMat4 world;
   };
+  
+  struct rovLineDrawCall
+  {
+    rovVec3 start;
+    rovVec3 end;
+    rovVec3 color;
+  };
 
   struct rovRenderPass
   {
@@ -132,6 +150,8 @@ namespace
     
     std::vector<rovMaterial> materials;
     std::vector<rovDrawCall> draw_calls;
+    
+    std::vector<rovLineDrawCall> line_draw_calls;
   };
   
   std::vector<rovRenderPass> rov_render_passes;
@@ -225,6 +245,21 @@ void
 rov_setShader(uint32_t shader_type)
 {
   curr_rov_mesh_shader = shader_type;
+}
+
+
+// ---------------------------------------------------- [ Dbg Line Renderer ] --
+
+
+void
+rov_submitLine(const float start[3], const float end[3])
+{
+  rovLineDrawCall dc;
+  memcpy(dc.start.data, start, sizeof(rovVec3));
+  memcpy(dc.end.data, end, sizeof(rovVec3));
+  memcpy(dc.color.data, curr_rov_clear_color, sizeof(rovVec3));
+  
+  rov_render_passes.back().line_draw_calls.push_back(dc);
 }
 
 
@@ -382,6 +417,17 @@ namespace
   };
   
   rov_gl_shader rov_mesh_shaders[3]; // Fullbright / Lit / DirLight
+  
+  
+  struct rovGLLineShader
+  {
+    GLuint program;
+    
+    GLint uni_wvp;
+    GLint uni_line_buffer;
+  };
+  
+  rovGLLineShader rov_line_shaders[1]; // Line shader
   
   inline
   void create_mesh_program(
@@ -673,6 +719,149 @@ rov_initialize()
     
     create_mesh_program(vs.c_str(), nullptr, fs.c_str(), &rov_mesh_shaders[2]);
   }
+  
+  // -- [ Line Renderer ] --
+  
+  /*
+    Line Shader
+  */
+  {
+    const char *vs = R"GLSL(
+      #version 150 core
+
+      /*
+        Output
+      */
+      out int gs_in_vert_id;
+
+      /*
+        Program
+      */
+      void
+      main()
+      {
+        gs_in_vert_id = gl_VertexID;
+      }
+
+    )GLSL";
+
+    const char *gs = R"GLSL(
+      #version 330
+
+
+      #define NUM_LINES 32
+      #define COMPONENTS_PER_LINE 3
+
+
+      layout (points) in;
+      layout (line_strip, max_vertices = 2) out;
+
+      /*
+        Inputs
+      */
+      in int              gs_in_vert_id[];
+
+
+      /*
+        Uniforms
+      */
+      uniform mat4        uni_wvp_mat;
+      uniform vec3        uni_line[NUM_LINES * COMPONENTS_PER_LINE];
+
+
+      /*
+        Outputs
+      */
+      out vec3            ps_in_color;
+
+
+      /*
+        Program
+      */
+      void
+      main()
+      {
+        int id = gs_in_vert_id[0] * COMPONENTS_PER_LINE;
+
+        int start = id + 0;
+        int end   = id + 1;
+        int color = id + 2;
+
+        // Generate the primitive //
+
+        ps_in_color = uni_line[color];
+
+        gl_Position = uni_wvp_mat * vec4(uni_line[start], 1);
+        EmitVertex();
+
+        gl_Position = uni_wvp_mat * vec4(uni_line[end], 1);
+        EmitVertex();
+
+        EndPrimitive();
+      }
+    )GLSL";
+
+    const char *fs = R"GLSL(
+      #version 150
+
+      /*
+        Inputs
+      */
+      in vec3 ps_in_color;
+
+
+      /*
+        Outputs
+      */
+      out vec4 ps_out_color;
+
+
+      /*
+        Program
+      */
+      void
+      main()
+      {
+        ps_out_color = vec4(ps_in_color, 1.0);
+      }
+    )GLSL";
+    
+    // -- Create Shader -- //
+    const GLuint vert_shd = glCreateShader(GL_VERTEX_SHADER);
+    glShaderSource(vert_shd, 1, &vs, NULL);
+    glCompileShader(vert_shd);
+
+    const GLuint geo_shd  = glCreateShader(GL_GEOMETRY_SHADER);
+    glShaderSource(geo_shd, 1, &gs, NULL);
+    glCompileShader(geo_shd);
+
+    const GLuint frag_shd = glCreateShader(GL_FRAGMENT_SHADER);
+    glShaderSource(frag_shd, 1, &fs, NULL);
+    glCompileShader(frag_shd);
+
+    rov_line_shaders[0].program = glCreateProgram();
+    LIB_ASSERT(rov_line_shaders[0].program);
+
+    glAttachShader(rov_line_shaders[0].program, vert_shd);
+    glAttachShader(rov_line_shaders[0].program, geo_shd);
+    glAttachShader(rov_line_shaders[0].program, frag_shd);
+
+    glLinkProgram(rov_line_shaders[0].program);
+
+    // -- Get Uniforms -- //
+    rov_line_shaders[0].uni_wvp   = glGetUniformLocation(rov_line_shaders[0].program, "uni_wvp_mat");
+    LIB_ASSERT(rov_line_shaders[0].uni_wvp > -1);
+    
+    rov_line_shaders[0].uni_line_buffer = glGetUniformLocation(rov_line_shaders[0].program, "uni_line[0]");
+    LIB_ASSERT(rov_line_shaders[0].uni_line_buffer > -1);
+
+    glUseProgram(rov_line_shaders[0].program);
+    
+    glEnable(GL_DEPTH_TEST);
+
+    glBindVertexArray(0);
+  }
+
 }
 
 
@@ -711,6 +900,7 @@ rov_execute()
     
     const math::mat4 proj = math::mat4_init_with_array(rp.proj.data);
     const math::mat4 view = math::mat4_init_with_array(rp.view.data);
+    const math::mat4 view_proj = math::mat4_multiply(view, proj);
     
     /*
       For each material in the pass.
@@ -809,12 +999,42 @@ rov_execute()
        
         glDrawArrays(GL_TRIANGLES, 0, vbo.vertex_count);
       }
+    } // For amts
+    
+    // Line Renderer
+    {
+      glUseProgram(rov_line_shaders[0].program);
+
+      // -- Draw the Batches Of Lines -- //
+      const size_t batches = (rp.line_draw_calls.size() / 32) + 1;
+      
+      for(size_t i = 0; i < batches; ++i)
+      {
+        // -- Load Camera -- //
+        glUniformMatrix4fv(
+          rov_line_shaders[0].uni_wvp,
+          1,
+          GL_FALSE,
+          math::mat4_get_data(view_proj)
+        );
+        
+        const size_t count(
+          ((i + 1) == batches) ?
+            rp.line_draw_calls.size() % 32 : 32
+        );
+
+        const uint32_t batch_start = i * 32;
+
+        glUniform3fv(
+          rov_line_shaders[0].uni_line_buffer,
+          count * 3,
+          (float*)&rp.line_draw_calls[batch_start]
+        );
+        
+        glDrawArrays(GL_POINTS, 0, count);
+      }
     }
   }
-  
-//  glBindBuffer(GL_ARRAY_BUFFER, 0);
-//  glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
-
   
   glBindVertexArray(0);
   
