@@ -82,7 +82,7 @@ void        rov_submitMeshTransform(const float world[16]);
 #include <vector>
 #include <string>
 #include <stdio.h>
-#include <utilities/utilities.hpp>
+#include <lib/utilities.hpp>
 
 
 namespace

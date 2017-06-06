@@ -1,4 +1,4 @@
-#include <utilities/platform.hpp>
+#include <lib/platform.hpp>
 
 
 #ifdef LIB_PLATFORM_WEB
